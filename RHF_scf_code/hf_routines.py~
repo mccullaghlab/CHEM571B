@@ -5,11 +5,19 @@ from scipy.special import sph_harm
 from scipy.special import erf
 
 class sto:
-    def __init__(self,N,alpha,d,R):
+    def __init__(self,N,zeta,R):
         self.N = N
-        self.alpha = alpha
-        self.d = d
+        self.zeta = zeta
         self.R = R
+#        self.alpha = np.array(N,dtype=float)
+#        self.d = np.array(N,dtype=float)
+        # zeta = 1 values
+        #self.alpha = np.array([0.168856,0.623913,3.42525])
+        self.alpha = np.array([0.109818,0.405771,2.22766])
+        self.d = np.array([0.444635,0.535328,0.154329])
+        for i in range(N):
+            self.alpha[i] = self.alpha[i]*zeta**2
+#            self.d[i] = self.d[i]*(2.0*self.alpha[i]/np.pi)**0.75
     # approximation of STO with n gaussians
     def sto_ng(self,r):
         g = 0.0
@@ -22,18 +30,20 @@ class atom:
         self.pos = pos
         self.charge = charge
 
+# compute electron density along x-axis assuming cylindrical symmetry
 def compute_electron_density(basis_set,P,x):
     M = len(basis_set)
     y = np.arange(0,5,0.1)
-    z = np.arange(-5,5,0.1)
     density = np.zeros((x.size,y.size),dtype=float)
     for i in range(x.size):
         for j in range(y.size):
-                r = np.linalg.norm(np.array([x[i],y[j]]))
                 rx = y[j]
+                xyz = np.array([x[i],y[j],0])
                 for mu in range(M):
+                    r_mu = np.linalg.norm(xyz-basis_set[mu].R)
                     for nu in range(M):
-                        density[i,j] += P[mu,nu]*basis_set[mu].sto_ng(r)*basis_set[nu].sto_ng(r)
+                        r_nu = np.linalg.norm(xyz-basis_set[nu].R)
+                        density[i,j] += P[mu,nu]*basis_set[mu].sto_ng(r_mu)*basis_set[nu].sto_ng(r_nu)
                 density[i,j] *= rx
     xDensity = np.empty(x.size,dtype=float)
     for i in range(x.size):
@@ -186,14 +196,21 @@ def constructDensityMat(C):
             P[j,i] = P[i,j]
     return P
 
+# orthogonalize basis
+def orthogonalize_basis(S):
+    U = np.array([[2**-0.5,2**-0.5],[2**-0.5,-(2**-0.5)]])
+    s = np.diag([(1+S[0,1])**-0.5,(1-S[0,1])**-0.5])
+    X = np.dot(U,s)
+    return X
+
 # for case of h2 we know Cs:
 def optimal_C(S):
     M = S.shape[0]
     C = np.empty((M,M),dtype=float)
     # in this case we know the answer so can set it to be
     C[0,0] = 1.0/np.sqrt(2*(1+S[0,1]))
-    C[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
     C[1,0] = C[0,0]
+    C[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
     C[1,1] = -C[0,1]
     return C
 
