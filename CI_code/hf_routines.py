@@ -5,11 +5,19 @@ from scipy.special import sph_harm
 from scipy.special import erf
 
 class sto:
-    def __init__(self,N,alpha,d,R):
+    def __init__(self,N,zeta,R):
         self.N = N
-        self.alpha = alpha
-        self.d = d
+        self.zeta = zeta
         self.R = R
+#        self.alpha = np.array(N,dtype=float)
+#        self.d = np.array(N,dtype=float)
+        # zeta = 1 values
+        #self.alpha = np.array([0.168856,0.623913,3.42525])
+        self.alpha = np.array([0.109818,0.405771,2.22766])
+        self.d = np.array([0.444635,0.535328,0.154329])
+        for i in range(N):
+            self.alpha[i] = self.alpha[i]*zeta**2
+#            self.d[i] = self.d[i]*(2.0*self.alpha[i]/np.pi)**0.75
     # approximation of STO with n gaussians
     def sto_ng(self,r):
         g = 0.0
@@ -22,14 +30,13 @@ class atom:
         self.pos = pos
         self.charge = charge
 
+# compute electron density along x-axis assuming cylindrical symmetry
 def compute_electron_density(basis_set,P,x):
     M = len(basis_set)
     y = np.arange(0,5,0.1)
-    z = np.arange(-5,5,0.1)
     density = np.zeros((x.size,y.size),dtype=float)
     for i in range(x.size):
         for j in range(y.size):
-                r = np.linalg.norm(np.array([x[i],y[j]]))
                 rx = y[j]
                 xyz = np.array([x[i],y[j],0])
                 for mu in range(M):
@@ -122,6 +129,21 @@ def gaussian_potential(alpha, RA, beta, RB, RC):
         prefactor = 2.0*np.pi*0.5/AplusB*np.sqrt(np.pi)/t*erf(t)
         return prefactor*np.exp(-alpha*beta/AplusB*RARB2)
 
+# Update all two-electron integrals given HF coefficients
+def update_twoE(C, twoE):
+    M = C.shape[0]
+    hf_twoE = np.zeros((M,M,M,M),dtype=float)
+    for i in range(M):
+        for j in range(M):
+            for k in range(M):
+                for l in range(M):
+                    for mu in range(M):
+                        for nu in range(M):
+                            for lam in range(M):
+                                for sig in range(M):
+                                    hf_twoE[i,j,k,l] += C[mu,i]*C[nu,j]*C[lam,k]*C[sig,l]*twoE[mu,nu,lam,sig]
+    return hf_twoE    
+    
 # Compute all two-electron integrals
 def compute_twoE(basis):
     M = len(basis)
@@ -189,20 +211,34 @@ def constructDensityMat(C):
             P[j,i] = P[i,j]
     return P
 
+# orthogonalize basis
+def orthogonalize_basis(S):
+    U = np.array([[2**-0.5,2**-0.5],[2**-0.5,-(2**-0.5)]])
+    s = np.diag([(1+S[0,1])**-0.5,(1-S[0,1])**-0.5])
+    X = np.dot(U,s)
+    return X
+
 # for case of h2 we know Cs:
 def optimal_C(S):
     M = S.shape[0]
     C = np.empty((M,M),dtype=float)
     # in this case we know the answer so can set it to be
     C[0,0] = 1.0/np.sqrt(2*(1+S[0,1]))
-    C[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
     C[1,0] = C[0,0]
+    C[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
     C[1,1] = -C[0,1]
     return C
 
 # compute total energy for HF
-def total_energy(F,Sinv,Hcore,P,atoms):
-    e,C = np.linalg.eig(np.dot(Sinv,F))
+def total_energy(F,X,Hcore,P,atoms):
+    e,C = np.linalg.eig(np.dot(np.dot(X.T,F),X))
+    # make sure eigenvalues and eigenvectors are sorted
+    idx = e.argsort()
+    e = e[idx]
+    C = C[:,idx]
+    # project the C matrix back into original basis
+    C = np.dot(X,C)
+    P = constructDensityMat(C)
     M = F.shape[1]
     Etotal = 0.0
     for i in range(M):
@@ -215,6 +251,75 @@ def total_energy(F,Sinv,Hcore,P,atoms):
             diff = atoms[atom1].pos - atoms[atom2].pos
             dist = np.linalg.norm(diff)
             Etotal += atoms[atom1].charge*atoms[atom2].charge/dist
-    return Etotal
+    return Etotal, C, e
 
 
+# compute total energy for HF
+def total_energy_Sinv(F,Sinv,S,Hcore,P,atoms):
+    M = F.shape[1]
+    e,C = np.linalg.eig(np.dot(Sinv,F))
+    # make sure eigenvalues and eigenvectors are sorted
+    idx = e.argsort()
+    e = e[idx]
+    C = C[:,idx]
+    # normalize the S*C matrix
+    SC = np.dot(S,C)
+    for i in range(M):
+        norm = np.linalg.norm(SC[:,i])
+        C[:,i] /= np.sqrt(norm)
+    # compute new density matrix
+    P = constructDensityMat(C)
+    # compute electronic energy
+    Etotal = 0.0
+    for i in range(M):
+        for j in range(M):
+            Etotal += P[i,j]*(Hcore[i,j]+F[i,j])
+    Etotal*=0.5
+    # add nuclear repulsion
+    nAtoms = len(atoms)
+    for atom1 in range(nAtoms-1):
+        for atom2 in range(atom1+1,nAtoms):
+            diff = atoms[atom1].pos - atoms[atom2].pos
+            dist = np.linalg.norm(diff)
+            Etotal += atoms[atom1].charge*atoms[atom2].charge/dist
+    return Etotal, C, P
+
+# routine to do CI calculation for H2 in minimal basis
+def CI(orbitalEnergies,twoE,atoms):
+    # Populate 2x2 Hamiltonian matrix
+    H_CI = np.empty((2,2),dtype=float)
+    H_CI[0,0] = 2*orbitalEnergies[0] - twoE[0,0,0,0]  # 2e1 - J11
+    H_CI[0,1] = H_CI[1,0] = twoE[0,1,1,0]  # K12
+    H_CI[1,1] = 2*orbitalEnergies[1] - 4*twoE[0,0,1,1] + twoE[1,1,1,1] + 2*twoE[0,1,1,0] # 2e2 -4J12 + J22 +2K12
+    # diagonalize
+    energy, CIs = np.linalg.eig(H_CI)
+    idx = energy.argsort()
+    energy = energy[idx]
+    CIs = CIs[:,idx]
+    nAtoms = len(atoms)
+    Enucl = 0.0
+    for atom1 in range(nAtoms-1):
+        for atom2 in range(atom1+1,nAtoms):
+            diff = atoms[atom1].pos - atoms[atom2].pos
+            dist = np.linalg.norm(diff)
+            Enucl += atoms[atom1].charge*atoms[atom2].charge/dist
+    return energy[0]+Enucl
+
+def perform_hf(basis,atoms):
+    # compute overlap matrix
+    S, Sinv = overlap(basis)
+    # compute Hcore and twoE that are not dependent on coefficients
+    T = kinetic(basis)
+    V = core_potential(basis,atoms)
+    Hcore = V + T
+    twoE = compute_twoE(basis)
+    # compute basis set orthogonalization transformation matrix
+    X = orthogonalize_basis(S)
+    # use optimal C based on symmetry
+    C = optimal_C(S)
+    P = constructDensityMat(C)
+    G = compute_G(P,twoE)
+    F = Hcore + G
+    hf_energy, C, orbitalEnergies = total_energy(F,X,Hcore,P,atoms)
+    hf_twoE = update_twoE(C,twoE)
+    return hf_energy, C, orbitalEnergies, hf_twoE
