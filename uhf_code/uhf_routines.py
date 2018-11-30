@@ -156,7 +156,7 @@ def constructDensityMat(C):
     P = np.zeros((M,M),dtype=float)
     for i in range(M):
         for j in range(i,M):
-            for a in range(M/2):
+            for a in range(M//2):
                 P[i,j] += C[i,a]*C[j,a]
             P[j,i] = P[i,j]
     return P

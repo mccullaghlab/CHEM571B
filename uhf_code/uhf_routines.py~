@@ -10,38 +10,11 @@ class sto:
         self.alpha = alpha
         self.d = d
         self.R = R
-    # approximation of STO with n gaussians
-    def sto_ng(self,r):
-        g = 0.0
-        for i in range(self.N):
-            g += self.d[i]*(2.0*self.alpha[i]/np.pi)**0.75*np.exp(-self.alpha[i]*r*r)
-        return g 
 
 class atom:
     def __init__(self,pos,charge):
         self.pos = pos
         self.charge = charge
-
-def compute_electron_density(basis_set,P,x):
-    M = len(basis_set)
-    y = np.arange(0,5,0.1)
-    z = np.arange(-5,5,0.1)
-    density = np.zeros((x.size,y.size),dtype=float)
-    for i in range(x.size):
-        for j in range(y.size):
-                r = np.linalg.norm(np.array([x[i],y[j]]))
-                rx = y[j]
-                xyz = np.array([x[i],y[j],0])
-                for mu in range(M):
-                    r_mu = np.linalg.norm(xyz-basis_set[mu].R)
-                    for nu in range(M):
-                        r_nu = np.linalg.norm(xyz-basis_set[nu].R)
-                        density[i,j] += P[mu,nu]*basis_set[mu].sto_ng(r_mu)*basis_set[nu].sto_ng(r_nu)
-                density[i,j] *= rx
-    xDensity = np.empty(x.size,dtype=float)
-    for i in range(x.size):
-        xDensity[i] = 2*np.pi*integrate.simps(density[i,:],y)
-    return xDensity
 
 # compute S, the overlap matrix, and S^-1
 def overlap(basis):
@@ -165,8 +138,8 @@ def gaussian_2e(alpha,RA,beta,RB,gamma,RC,delta,RD):
     return prefactor*np.exp( -alpha*beta/AplusB*RARB2 - gamma*delta/GplusD*RCRD2)
 
 # populate G matrix using two-electron integrals and density matrix
-def compute_G(P,twoE):
-    M = P.shape[1]
+def compute_G(PT,Pab,twoE):
+    M = Pab.shape[1]
     G = np.zeros((M,M),dtype=float)
 
     for i in range(M):
@@ -174,7 +147,7 @@ def compute_G(P,twoE):
             G[i,j] = 0.0
             for k in range(M):
                 for l in range(M):
-                    G[i,j] += P[k,l]*(twoE[i,j,l,k]-0.5*twoE[i,k,l,j])
+                    G[i,j] += PT[k,l]*twoE[i,j,l,k]-Pab[k,l]*twoE[i,k,l,j]
     return G
 
 # create and populate density matrix
@@ -183,9 +156,8 @@ def constructDensityMat(C):
     P = np.zeros((M,M),dtype=float)
     for i in range(M):
         for j in range(i,M):
-            for a in range(M//2):
+            for a in range(M/2):
                 P[i,j] += C[i,a]*C[j,a]
-            P[i,j] *= 2.0
             P[j,i] = P[i,j]
     return P
 
@@ -201,13 +173,14 @@ def optimal_C(S):
     return C
 
 # compute total energy for HF
-def total_energy(F,Sinv,Hcore,P,atoms):
-    e,C = np.linalg.eig(np.dot(Sinv,F))
-    M = F.shape[1]
+def total_energy(Fa,Fb,Hcore,PT,Pa,Pb,atoms):
+#    e,C = np.linalg.eig(np.dot(Sinv,F))
+#    P = constructDensityMat(C)
+    M = Fa.shape[1]
     Etotal = 0.0
     for i in range(M):
         for j in range(M):
-            Etotal += P[i,j]*(Hcore[i,j]+F[i,j])
+            Etotal += PT[j,i]*Hcore[i,j]+Pa[j,i]*Fa[i,j]+Pb[j,i]*Fb[i,j]
     Etotal*=0.5
     nAtoms = len(atoms)
     for atom1 in range(nAtoms-1):
@@ -216,5 +189,64 @@ def total_energy(F,Sinv,Hcore,P,atoms):
             dist = np.linalg.norm(diff)
             Etotal += atoms[atom1].charge*atoms[atom2].charge/dist
     return Etotal
+
+def C_u(S,Hcore,twoE):
+    M = S.shape[0]
+    Ca = np.empty((M,M),dtype=float)
+    Cb = np.empty((M,M),dtype=float)
+    C = np.empty((M,M),dtype=float)
+    C[0,0] = 1.0/np.sqrt(2*(1+S[0,1]))
+    C[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
+    C[1,0] = C[0,0]
+    C[1,1] = -C[0,1]
+    h11 = 0.0
+    h22 = 0.0
+    for i in range(M):
+        for j in range(M):
+            h11 += C[i,0]*C[j,0]*Hcore[i,j]
+            h22 += C[i,1]*C[j,1]*Hcore[i,j]
+    J11 = 0.0
+    J12 = 0.0
+    J22 = 0.0
+    K12 = 0.0
+    for i in range(M):
+        for j in range(M):
+            for k in range(M):
+                for l in range(M):
+                    J11 += C[i,0]*C[j,0]*C[k,0]*C[l,0]*twoE[i,j,k,l]
+                    J12 += C[i,0]*C[j,0]*C[k,1]*C[l,1]*twoE[i,j,k,l]
+                    J22 += C[i,1]*C[j,1]*C[k,1]*C[l,1]*twoE[i,j,k,l]
+                    K12 += C[i,0]*C[j,1]*C[k,1]*C[l,0]*twoE[i,j,k,l]
+    eta = (h22-h11+J22-J12+2*K12)/(J11+J22-2*J12+4*K12)
+    if ( eta >= 0.0 and eta <= 1.0):
+        sin2theta = 1.0 - eta
+        cosTheta = np.sqrt(eta)
+        sinTheta = np.sqrt(sin2theta)
+        Ca[0,0] = (2*(1.0+S[0,1]))**-0.5*cosTheta + (2*(1.0-S[0,1]))**-0.5*sinTheta
+        Ca[1,0] = (2*(1.0+S[0,1]))**-0.5*cosTheta - (2*(1.0-S[0,1]))**-0.5*sinTheta
+        norm = np.linalg.norm(Ca[:,0])
+#        Ca[0,0] /= norm
+#        Ca[1,0] /= norm
+        Ca[0,1] = (2*(1.0-S[0,1]))**-0.5*cosTheta - (2*(1.0+S[0,1]))**-0.5*sinTheta
+        Ca[1,1] = -(2*(1.0-S[0,1]))**-0.5*cosTheta - (2*(1.0+S[0,1]))**-0.5*sinTheta
+        norm = np.linalg.norm(Ca[:,1])
+#        Ca[0,1] /= norm
+#        Ca[1,1] /= norm
+        Cb[0,0] = Ca[1,0]
+        Cb[1,0] = Ca[0,0]
+        Cb[0,1] = (2*(1.0-S[0,1]))**-0.5*cosTheta + (2*(1.0+S[0,1]))**-0.5*sinTheta
+        Cb[1,1] = -(2*(1.0-S[0,1]))**-0.5*cosTheta + (2*(1.0+S[0,1]))**-0.5*sinTheta
+        norm = np.linalg.norm(Cb[:,1])
+#        Cb[0,1] /= norm
+#        Cb[1,1] /= norm
+    else:
+        Ca[0,0] = 1.0/np.sqrt(2*(1+S[0,1]))
+        Ca[0,1] = 1.0/np.sqrt(2*(1-S[0,1]))
+        Ca[1,0] = Ca[0,0]
+        Ca[1,1] = -Ca[0,1]
+        Cb = Ca
+    return Ca, Cb, eta
+
+
 
 
